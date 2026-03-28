@@ -62,6 +62,26 @@ func (e *Emitter) Emit(_ context.Context, eventType string, data interface{}) er
 	return nil
 }
 
+// UsageData is the payload for token usage events.
+type UsageData struct {
+	TenantID       string `json:"tenant_id"`
+	ConversationID string `json:"conversation_id,omitempty"`
+	TaskID         string `json:"task_id,omitempty"`
+	InstanceID     string `json:"instance_id,omitempty"`
+	Provider       string `json:"provider"`
+	Model          string `json:"model"`
+	InputTokens    int    `json:"input_tokens"`
+	OutputTokens   int    `json:"output_tokens"`
+}
+
+// EmitUsage publishes a token usage CloudEvent.
+func (e *Emitter) EmitUsage(ctx context.Context, data *UsageData) error {
+	if data.InputTokens == 0 && data.OutputTokens == 0 {
+		return nil
+	}
+	return e.Emit(ctx, "io.volund.usage.tokens", data)
+}
+
 // Close closes the underlying NATS connection.
 func (e *Emitter) Close() error {
 	if e.conn != nil {

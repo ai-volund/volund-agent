@@ -1,30 +1,67 @@
 package runtime
 
 import (
-	"context"
+	"sync"
 	"time"
 )
 
-// InboxMessage represents a message received by the agent.
-type InboxMessage struct {
-	// Type identifies the kind of message (e.g. "task.assigned", "chat.message").
-	Type string
-	// Payload is the raw message content.
-	Payload []byte
-	// Timestamp is when the message was received.
-	Timestamp time.Time
+// TaskResult holds the outcome of a delegated specialist task.
+type TaskResult struct {
+	TaskID    string `json:"task_id"`
+	Status    string `json:"status"` // "pending", "complete", "error"
+	Content   string `json:"content,omitempty"`
+	Error     string `json:"error,omitempty"`
+	UpdatedAt time.Time
 }
 
-// Inbox manages incoming messages for the agent runtime.
-type Inbox struct{}
+// Inbox is a concurrency-safe in-memory store for specialist task results.
+// The orchestrator marks tasks as pending on dispatch and updates them when
+// results arrive over NATS. GetTaskResult reads from this inbox.
+type Inbox struct {
+	mu      sync.RWMutex
+	results map[string]*TaskResult
+}
 
-// NewInbox creates a new Inbox.
+// NewInbox creates an empty Inbox.
 func NewInbox() *Inbox {
-	return &Inbox{}
+	return &Inbox{results: make(map[string]*TaskResult)}
 }
 
-// Drain retrieves all pending messages from the inbox. This is a stub that
-// returns an empty slice until a real message transport is connected.
-func (i *Inbox) Drain(_ context.Context) ([]InboxMessage, error) {
-	return nil, nil
+// SetPending records a task as dispatched but not yet complete.
+func (in *Inbox) SetPending(taskID string) {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	in.results[taskID] = &TaskResult{
+		TaskID:    taskID,
+		Status:    "pending",
+		UpdatedAt: time.Now(),
+	}
+}
+
+// Put stores or overwrites a task result in the inbox.
+func (in *Inbox) Put(result *TaskResult) {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	result.UpdatedAt = time.Now()
+	in.results[result.TaskID] = result
+}
+
+// Get returns the current result for the given task ID, or nil if unknown.
+func (in *Inbox) Get(taskID string) *TaskResult {
+	in.mu.RLock()
+	defer in.mu.RUnlock()
+	r, ok := in.results[taskID]
+	if !ok {
+		return nil
+	}
+	// Return a copy to avoid data races on the caller side.
+	cp := *r
+	return &cp
+}
+
+// Len returns the number of entries in the inbox (useful for tests).
+func (in *Inbox) Len() int {
+	in.mu.RLock()
+	defer in.mu.RUnlock()
+	return len(in.results)
 }

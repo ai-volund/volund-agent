@@ -30,13 +30,23 @@ func NewClient(addr string) (*Client, error) {
 	}, nil
 }
 
-// Chat sends a chat completion request to the LLM Router.
+// Chat sends a non-streaming chat request to the LLM Router.
 func (c *Client) Chat(ctx context.Context, req *volundv1.ChatRequest) (*volundv1.ChatResponse, error) {
 	resp, err := c.client.Chat(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("LLM chat request failed: %w", err)
 	}
 	return resp, nil
+}
+
+// StreamChat opens a streaming chat request to the LLM Router.
+// The returned stream receives TextDelta, ToolUse, and Complete chunks.
+func (c *Client) StreamChat(ctx context.Context, req *volundv1.StreamChatRequest) (volundv1.LLMService_StreamChatClient, error) {
+	stream, err := c.client.StreamChat(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("LLM stream chat request failed: %w", err)
+	}
+	return stream, nil
 }
 
 // Close releases the underlying gRPC connection.

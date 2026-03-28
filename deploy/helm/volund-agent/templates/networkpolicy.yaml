@@ -1,0 +1,57 @@
+{{- if .Values.networkPolicy.enabled }}
+---
+# Default deny all traffic for agent pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "volund-agent.fullname" . }}-default-deny
+  labels:
+    {{- include "volund-agent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "volund-agent.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Allow agent pods to reach required services only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "volund-agent.fullname" . }}-allow-egress
+  labels:
+    {{- include "volund-agent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "volund-agent.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Control plane gateway (gRPC)
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.gatewayPodSelector | nindent 14 }}
+      ports:
+        - port: {{ .Values.networkPolicy.gatewayGrpcPort }}
+          protocol: TCP
+        - port: {{ .Values.networkPolicy.gatewayHttpPort }}
+          protocol: TCP
+    # NATS
+    - ports:
+        - port: {{ .Values.networkPolicy.natsPort }}
+          protocol: TCP
+    {{- if .Values.networkPolicy.blockMetadata }}
+    # Block cloud metadata — the default-deny above handles this implicitly.
+    # Only the above egress destinations are reachable. 169.254.169.254 is
+    # not in any allow rule, so it is blocked.
+    {{- end }}
+{{- end }}

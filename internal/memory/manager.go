@@ -2,6 +2,8 @@ package memory
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -31,6 +33,10 @@ type Manager interface {
 	StoreLongTerm(ctx context.Context, mem Memory) error
 	// SearchSimilar finds memories similar to the query using vector search.
 	SearchSimilar(ctx context.Context, query string, limit int) ([]Memory, error)
+	// RetrieveContext searches for memories relevant to the query and returns
+	// them formatted as a block suitable for system prompt injection.
+	// Returns empty string if no relevant memories are found.
+	RetrieveContext(ctx context.Context, query string, limit int) string
 }
 
 // noopManager is a no-op implementation of Manager for development use.
@@ -56,4 +62,22 @@ func (n *noopManager) StoreLongTerm(_ context.Context, _ Memory) error {
 
 func (n *noopManager) SearchSimilar(_ context.Context, _ string, _ int) ([]Memory, error) {
 	return nil, nil
+}
+
+func (n *noopManager) RetrieveContext(_ context.Context, _ string, _ int) string {
+	return ""
+}
+
+// FormatMemories formats a slice of memories into a block for system prompt injection.
+func FormatMemories(memories []Memory) string {
+	if len(memories) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\n<relevant-memories>\n")
+	for _, m := range memories {
+		fmt.Fprintf(&b, "[%s] %s\n", m.Type, m.Content)
+	}
+	b.WriteString("</relevant-memories>")
+	return b.String()
 }

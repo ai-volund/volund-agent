@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "volund-agent.fullname" . }}
+  labels:
+    {{- include "volund-agent.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "volund-agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "volund-agent.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: agent
+          image: "{{ .Values.image.repository }}:{{ include "volund-agent.imageTag" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: VOLUND_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: VOLUND_PROFILE
+              value: {{ .Values.agent.profileName | quote }}
+            - name: VOLUND_PROFILE_TYPE
+              value: {{ .Values.agent.profileType | quote }}
+            - name: VOLUND_PROVIDER
+              value: {{ .Values.agent.provider | quote }}
+            - name: VOLUND_MODEL
+              value: {{ .Values.agent.model | quote }}
+            - name: VOLUND_MAX_TOKENS
+              value: {{ .Values.agent.maxTokens | quote }}
+            - name: VOLUND_MAX_TOOL_ROUNDS
+              value: {{ .Values.agent.maxToolRounds | quote }}
+            - name: VOLUND_CONTEXT_BUDGET
+              value: {{ .Values.agent.contextBudget | quote }}
+            {{- if .Values.agent.systemPrompt }}
+            - name: VOLUND_SYSTEM_PROMPT
+              value: {{ .Values.agent.systemPrompt | quote }}
+            {{- end }}
+            {{- if .Values.nats.url }}
+            - name: VOLUND_NATS_URL
+              value: {{ .Values.nats.url | quote }}
+            {{- end }}
+            - name: VOLUND_LLM_ROUTER_ADDR
+              value: {{ .Values.llmRouter.addr | quote }}
+            - name: VOLUND_GATEWAY_URL
+              value: {{ .Values.gateway.url | quote }}
+            {{- if .Values.redis.addr }}
+            - name: VOLUND_REDIS_ADDR
+              value: {{ .Values.redis.addr | quote }}
+            {{- end }}
+            {{- if .Values.sandbox.enabled }}
+            - name: VOLUND_SANDBOX_ENDPOINT
+              value: {{ .Values.sandbox.endpoint | quote }}
+            - name: VOLUND_SANDBOX_ENABLED
+              value: "true"
+            {{- end }}
+            {{- if .Values.otel.enabled }}
+            - name: VOLUND_OTLP_ENDPOINT
+              value: {{ .Values.otel.endpoint | quote }}
+            {{- end }}
+            - name: VOLUND_ENV
+              value: {{ .Values.environment | quote }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

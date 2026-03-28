@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/ai-volund/volund-agent/internal/config"
+	votel "github.com/ai-volund/volund-agent/internal/otel"
 	"github.com/ai-volund/volund-agent/internal/runtime"
 )
 
@@ -26,8 +27,24 @@ func main() {
 		level = slog.LevelError
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
-	slog.SetDefault(logger)
+	jsonHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})
+	slog.SetDefault(slog.New(votel.NewTraceSlogHandler(jsonHandler)))
+
+	// Initialize OpenTelemetry.
+	otelShutdown, err := votel.Init(votel.Config{
+		ServiceName:  "volund-agent",
+		OTLPEndpoint: cfg.OTLPEndpoint,
+		Environment:  cfg.Environment,
+	})
+	if err != nil {
+		slog.Error("otel init failed", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := otelShutdown(context.Background()); err != nil {
+			slog.Error("otel shutdown error", "error", err)
+		}
+	}()
 
 	slog.Info("starting volund-agent",
 		"version", version,
