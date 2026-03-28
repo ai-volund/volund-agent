@@ -15,35 +15,68 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: volund-agent
+      - uses: actions/checkout@v4
+        with:
+          repository: ai-volund/volund-proto
+          path: volund-proto
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
+      - name: Create go.work
+        run: |
+          go work init
+          go work use ./volund-agent ./volund-proto
       - uses: golangci/golangci-lint-action@v6
         with:
           version: latest
+          working-directory: volund-agent
 
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: volund-agent
+      - uses: actions/checkout@v4
+        with:
+          repository: ai-volund/volund-proto
+          path: volund-proto
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
+      - name: Create go.work
+        run: |
+          go work init
+          go work use ./volund-agent ./volund-proto
       - run: go test -race -coverprofile=coverage.out ./...
+        working-directory: volund-agent
       - uses: actions/upload-artifact@v4
         with:
           name: coverage
-          path: coverage.out
+          path: volund-agent/coverage.out
 
   build:
     runs-on: ubuntu-latest
     needs: [lint, test]
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: volund-agent
+      - uses: actions/checkout@v4
+        with:
+          repository: ai-volund/volund-proto
+          path: volund-proto
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
+      - name: Create go.work
+        run: |
+          go work init
+          go work use ./volund-agent ./volund-proto
       - run: make build
+        working-directory: volund-agent
 
   docker:
     runs-on: ubuntu-latest
