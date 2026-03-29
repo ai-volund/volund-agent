@@ -465,6 +465,247 @@ func TestSandboxServiceEndpoint_Unset(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// SandboxConfig — Router precedence
+// ---------------------------------------------------------------------------
+
+func TestSandboxConfig_RouterPrecedence(t *testing.T) {
+	// When both RouterURL and Endpoint are set, router mode should take precedence.
+	exec := NewSandboxExecutor(SandboxConfig{
+		Endpoint:  "http://sandbox:8090",
+		RouterURL: "http://router:8091",
+		TenantID:  "tenant-1",
+		PoolRef:   "custom-pool",
+	})
+	if exec == nil {
+		t.Fatal("expected non-nil executor")
+	}
+	if !exec.IsRouterMode() {
+		t.Fatal("expected router mode when RouterURL is set")
+	}
+	if exec.routerURL != "http://router:8091" {
+		t.Fatalf("routerURL = %q, want http://router:8091", exec.routerURL)
+	}
+	if exec.tenantID != "tenant-1" {
+		t.Fatalf("tenantID = %q, want tenant-1", exec.tenantID)
+	}
+	// In router mode, direct endpoint should be empty (resolved per conversation).
+	if exec.endpoint != "" {
+		t.Fatalf("endpoint = %q, want empty in router mode", exec.endpoint)
+	}
+}
+
+func TestSandboxConfig_DirectMode(t *testing.T) {
+	exec := NewSandboxExecutor(SandboxConfig{
+		Endpoint: "http://sandbox:8090",
+	})
+	if exec == nil {
+		t.Fatal("expected non-nil executor")
+	}
+	if exec.IsRouterMode() {
+		t.Fatal("did not expect router mode when only Endpoint is set")
+	}
+	if exec.endpoint != "http://sandbox:8090" {
+		t.Fatalf("endpoint = %q, want http://sandbox:8090", exec.endpoint)
+	}
+}
+
+func TestSandboxConfig_NeitherSet(t *testing.T) {
+	exec := NewSandboxExecutor(SandboxConfig{})
+	if exec != nil {
+		t.Fatal("expected nil executor when neither Endpoint nor RouterURL is set")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Router client — claim on first execute
+// ---------------------------------------------------------------------------
+
+func TestRouterClient_ClaimsOnFirstExecute(t *testing.T) {
+	claimCalled := false
+
+	// Fake sandbox pod for the proxied execution.
+	sandboxPod := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(sandboxResponse{Stdout: "hello\n", ExitCode: 0})
+	}))
+	defer sandboxPod.Close()
+
+	// Fake router.
+	router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/v1/sandboxes":
+			claimCalled = true
+			var req map[string]string
+			json.NewDecoder(r.Body).Decode(&req)
+			if req["conversation_id"] != "conv-1" {
+				t.Errorf("conversation_id = %q, want conv-1", req["conversation_id"])
+			}
+			if req["tenant_id"] != "t-abc" {
+				t.Errorf("tenant_id = %q, want t-abc", req["tenant_id"])
+			}
+			json.NewEncoder(w).Encode(map[string]string{
+				"sandbox_id": "claim-123",
+				"endpoint":   sandboxPod.URL,
+			})
+		case r.Method == "POST" && r.URL.Path == "/v1/sandboxes/claim-123/execute":
+			// Proxy to sandbox pod.
+			json.NewEncoder(w).Encode(sandboxResponse{Stdout: "hello\n", ExitCode: 0})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer router.Close()
+
+	exec := NewSandboxExecutor(SandboxConfig{
+		RouterURL: router.URL,
+		TenantID:  "t-abc",
+		PoolRef:   "test-pool",
+	})
+
+	output, err := exec.ExecuteViaRouter(context.Background(), "conv-1", "python", "print('hello')", 10*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !claimCalled {
+		t.Fatal("expected router claim to be called")
+	}
+	if output != "hello\n" {
+		t.Fatalf("output = %q, want %q", output, "hello\n")
+	}
+
+	// Verify session is cached.
+	sandboxID, endpoint, ok := exec.CachedSession("conv-1")
+	if !ok {
+		t.Fatal("expected cached session")
+	}
+	if sandboxID != "claim-123" {
+		t.Fatalf("cached sandbox_id = %q, want claim-123", sandboxID)
+	}
+	if endpoint != sandboxPod.URL {
+		t.Fatalf("cached endpoint = %q, want %q", endpoint, sandboxPod.URL)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Router client — reuses existing claim
+// ---------------------------------------------------------------------------
+
+func TestRouterClient_ReusesExistingClaim(t *testing.T) {
+	claimCount := 0
+
+	router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/v1/sandboxes":
+			claimCount++
+			json.NewEncoder(w).Encode(map[string]string{
+				"sandbox_id": "claim-reuse",
+				"endpoint":   "http://fake-pod:8090",
+			})
+		case r.Method == "POST" && r.URL.Path == "/v1/sandboxes/claim-reuse/execute":
+			json.NewEncoder(w).Encode(sandboxResponse{Stdout: "ok", ExitCode: 0})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer router.Close()
+
+	exec := NewSandboxExecutor(SandboxConfig{
+		RouterURL: router.URL,
+		TenantID:  "t-1",
+	})
+
+	// First call — should claim.
+	_, err := exec.ExecuteViaRouter(context.Background(), "conv-2", "bash", "echo ok", 5*time.Second)
+	if err != nil {
+		t.Fatalf("first execute error: %v", err)
+	}
+
+	// Second call — should reuse.
+	_, err = exec.ExecuteViaRouter(context.Background(), "conv-2", "bash", "echo ok", 5*time.Second)
+	if err != nil {
+		t.Fatalf("second execute error: %v", err)
+	}
+
+	if claimCount != 1 {
+		t.Fatalf("claim called %d times, want 1 (should reuse cached)", claimCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Router client — release
+// ---------------------------------------------------------------------------
+
+func TestRouterClient_Release(t *testing.T) {
+	deleteCalled := false
+	deletedID := ""
+
+	router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/v1/sandboxes":
+			json.NewEncoder(w).Encode(map[string]string{
+				"sandbox_id": "claim-rel",
+				"endpoint":   "http://fake-pod:8090",
+			})
+		case r.Method == "DELETE":
+			deleteCalled = true
+			// Extract sandbox_id from path: /v1/sandboxes/claim-rel
+			deletedID = r.URL.Path[len("/v1/sandboxes/"):]
+			json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+		case r.Method == "POST" && r.URL.Path == "/v1/sandboxes/claim-rel/execute":
+			json.NewEncoder(w).Encode(sandboxResponse{Stdout: "x", ExitCode: 0})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer router.Close()
+
+	exec := NewSandboxExecutor(SandboxConfig{
+		RouterURL: router.URL,
+		TenantID:  "t-1",
+	})
+
+	// Claim by executing.
+	_, err := exec.ExecuteViaRouter(context.Background(), "conv-3", "bash", "echo x", 5*time.Second)
+	if err != nil {
+		t.Fatalf("execute error: %v", err)
+	}
+
+	// Release.
+	if err := exec.Release(context.Background(), "conv-3"); err != nil {
+		t.Fatalf("release error: %v", err)
+	}
+
+	if !deleteCalled {
+		t.Fatal("expected DELETE to be called")
+	}
+	if deletedID != "claim-rel" {
+		t.Fatalf("deleted sandbox_id = %q, want claim-rel", deletedID)
+	}
+
+	// Should no longer be cached.
+	_, _, ok := exec.CachedSession("conv-3")
+	if ok {
+		t.Fatal("session should have been removed from cache after release")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Router client — release with no cached session (no-op)
+// ---------------------------------------------------------------------------
+
+func TestRouterClient_ReleaseNoop(t *testing.T) {
+	exec := NewSandboxExecutor(SandboxConfig{
+		RouterURL: "http://unused:8091",
+		TenantID:  "t-1",
+	})
+
+	// Release without claiming should be a no-op.
+	err := exec.Release(context.Background(), "nonexistent-conv")
+	if err != nil {
+		t.Fatalf("expected no error for release of uncached session, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // RunCodeSandboxed
 // ---------------------------------------------------------------------------
 

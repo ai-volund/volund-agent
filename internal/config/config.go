@@ -43,8 +43,11 @@ type Config struct {
 	OTLPEndpoint string // VOLUND_OTLP_ENDPOINT — gRPC endpoint for OTLP collector
 	Environment  string // VOLUND_ENV — deployment environment (dev, staging, prod)
 	// Sandbox
-	SandboxEndpoint string // VOLUND_SANDBOX_ENDPOINT — sandbox service URL (empty = subprocess fallback)
-	SandboxEnabled  bool   // VOLUND_SANDBOX_ENABLED — enable sandboxed code execution
+	SandboxEndpoint  string // VOLUND_SANDBOX_ENDPOINT — sandbox service URL (v1 direct mode, empty = subprocess fallback)
+	SandboxEnabled   bool   // VOLUND_SANDBOX_ENABLED — enable sandboxed code execution
+	SandboxRouterURL string // VOLUND_SANDBOX_ROUTER_URL — sandbox router URL (v2 router mode, takes precedence over Endpoint)
+	SandboxTenantID  string // VOLUND_SANDBOX_TENANT_ID — tenant for claim ownership (router mode)
+	SandboxPoolRef   string // VOLUND_SANDBOX_POOL_REF — warm pool name (router mode, default "tool-execution-pool")
 	// LogLevel controls structured logging verbosity (debug, info, warn, error).
 	LogLevel string
 }
@@ -69,8 +72,11 @@ func Load() *Config {
 		OTLPEndpoint:  os.Getenv("VOLUND_OTLP_ENDPOINT"),
 		Environment:   envOrDefault("VOLUND_ENV", "dev"),
 		GatewayURL:      envOrDefault("VOLUND_GATEWAY_URL", "http://volund:8080"),
-		SandboxEndpoint: os.Getenv("VOLUND_SANDBOX_ENDPOINT"),
-		SandboxEnabled:  os.Getenv("VOLUND_SANDBOX_ENABLED") == "true",
+		SandboxEndpoint:  os.Getenv("VOLUND_SANDBOX_ENDPOINT"),
+		SandboxEnabled:   os.Getenv("VOLUND_SANDBOX_ENABLED") == "true",
+		SandboxRouterURL: os.Getenv("VOLUND_SANDBOX_ROUTER_URL"),
+		SandboxTenantID:  os.Getenv("VOLUND_SANDBOX_TENANT_ID"),
+		SandboxPoolRef:   envOrDefault("VOLUND_SANDBOX_POOL_REF", "tool-execution-pool"),
 		LogLevel:        envOrDefault("VOLUND_LOG_LEVEL", "info"),
 	}
 }

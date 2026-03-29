@@ -1,0 +1,47 @@
+# Dockerfile.sandbox-router — builds the ghcr.io/ai-volund/sandbox-router image.
+# Lightweight Go HTTP service that manages sandbox claim lifecycle and proxies
+# execution requests to sandbox pods.
+#
+# Build from workspace root (where volund-proto and volund-agent live):
+#   docker build -f volund-agent/Dockerfile.sandbox-router -t ghcr.io/ai-volund/sandbox-router:latest .
+
+FROM golang:1.26-bookworm AS builder
+
+WORKDIR /workspace
+
+# Copy proto dependency for module resolution.
+COPY volund-proto/ volund-proto/
+
+# Cache module downloads.
+COPY volund-agent/go.mod volund-agent/go.sum volund-agent/
+WORKDIR /workspace/volund-agent
+RUN go mod download
+
+# Build sandbox-router binary.
+COPY volund-agent/ .
+RUN CGO_ENABLED=0 GOOS=linux \
+    go build -ldflags "-s -w" -o /bin/sandbox-router ./cmd/sandbox-router
+
+# --- Runtime image ---
+# Minimal Alpine — no language runtimes needed, this is a pure Go service.
+FROM alpine:3.19
+
+RUN apk add --no-cache ca-certificates
+
+# Create non-root user.
+RUN addgroup -g 1000 -S router && \
+    adduser -u 1000 -S -G router router
+
+COPY --from=builder /bin/sandbox-router /bin/sandbox-router
+
+# Run as non-root.
+USER 1000:1000
+
+ENV SANDBOX_ROUTER_ADDR=":8091"
+
+EXPOSE 8091
+
+HEALTHCHECK --interval=5s --timeout=2s --retries=3 \
+    CMD wget -q -O - http://localhost:8091/healthz || exit 1
+
+ENTRYPOINT ["/bin/sandbox-router"]

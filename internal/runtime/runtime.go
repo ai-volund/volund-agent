@@ -15,6 +15,7 @@ import (
 	"github.com/ai-volund/volund-agent/internal/llm"
 	"github.com/ai-volund/volund-agent/internal/memory"
 	votel "github.com/ai-volund/volund-agent/internal/otel"
+	"github.com/ai-volund/volund-agent/internal/safety"
 	"github.com/ai-volund/volund-agent/internal/skill"
 	"github.com/ai-volund/volund-agent/internal/stream"
 	"github.com/ai-volund/volund-agent/internal/tools"
@@ -246,10 +247,17 @@ func (r *Runtime) buildToolRegistry() *tools.Registry {
 
 	// All agents get code execution — sandboxed when configured, subprocess fallback.
 	sandbox := builtin.NewSandboxExecutor(builtin.SandboxConfig{
-		Endpoint: r.cfg.SandboxEndpoint,
+		Endpoint:  r.cfg.SandboxEndpoint,
+		RouterURL: r.cfg.SandboxRouterURL,
+		TenantID:  r.cfg.SandboxTenantID,
+		PoolRef:   r.cfg.SandboxPoolRef,
 	})
 	if sandbox != nil {
-		slog.Info("sandbox executor enabled", "endpoint", r.cfg.SandboxEndpoint)
+		if sandbox.IsRouterMode() {
+			slog.Info("sandbox executor enabled (router mode)", "router_url", r.cfg.SandboxRouterURL)
+		} else {
+			slog.Info("sandbox executor enabled (direct mode)", "endpoint", r.cfg.SandboxEndpoint)
+		}
 		reg.Register(builtin.NewRunCodeSandboxed(sandbox))
 	} else {
 		reg.Register(builtin.RunCode{})
@@ -264,6 +272,12 @@ func (r *Runtime) buildToolRegistry() *tools.Registry {
 		reg.Register(builtin.NewCreateTask(r.makeDispatchFunc()))
 		reg.Register(builtin.NewGetTaskResult(&inboxAdapter{inbox: r.inbox}))
 	}
+
+	// Default security hooks — applied to ALL tool executions regardless of
+	// profile type. Order matters: validation before execution, redaction after.
+	reg.AddBeforeHook(safety.ToolArgumentValidationHook)
+	reg.AddAfterHook(safety.SecretRedactionHook)
+	reg.AddAfterHook(safety.OutputSizeLimitHook(safety.MaxContentLength))
 
 	slog.Info("tool registry built",
 		"profile_type", r.cfg.ProfileType,

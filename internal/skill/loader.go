@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	volundv1 "github.com/ai-volund/volund-proto/gen/go/volund/v1"
+
+	"github.com/ai-volund/volund-agent/internal/safety"
 )
 
 // ToolCaller is the interface both MCPClient and MCPHTTPClient satisfy.
@@ -47,10 +49,16 @@ func Load(ctx context.Context, skills []Spec) (*LoadResult, error) {
 	var promptParts []string
 
 	for _, s := range skills {
+		// Sanitize skill metadata before it becomes LLM-visible.
+		s.Description = safety.SanitizeSkillMetadata(s.Description)
+		for i := range s.Parameters {
+			s.Parameters[i].Description = safety.SanitizeSkillMetadata(s.Parameters[i].Description)
+		}
+
 		switch s.Type {
 		case "prompt":
 			if s.Prompt != "" {
-				promptParts = append(promptParts, fmt.Sprintf("## Skill: %s\n\n%s", s.Name, s.Prompt))
+				promptParts = append(promptParts, fmt.Sprintf("## Skill: %s\n\n%s", s.Name, safety.SanitizeSkillMetadata(s.Prompt)))
 				slog.Info("loaded prompt skill", "name", s.Name)
 			}
 
@@ -182,7 +190,7 @@ func discoverTools(ctx context.Context, skillName string, client ToolCaller) ([]
 		tools = append(tools, &mcpTool{
 			skillName:   skillName,
 			name:        t.Name,
-			description: t.Description,
+			description: safety.SanitizeSkillMetadata(t.Description),
 			inputSchema: t.InputSchema,
 			client:      client,
 		})

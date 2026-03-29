@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	volundv1 "github.com/ai-volund/volund-proto/gen/go/volund/v1"
@@ -19,21 +20,64 @@ import (
 //
 // Architecture: the agent calls a sandbox service endpoint which manages
 // ephemeral pods. The sandbox service runs in the cluster and exposes:
-//   POST /execute  {language, code, timeout} → {stdout, stderr, exit_code}
+//
+//	POST /execute  {language, code, timeout} → {stdout, stderr, exit_code}
+//
+// Two modes:
+//   - Direct mode (v1): talks directly to a sandbox service endpoint.
+//   - Router mode (v2): talks to the Sandbox Router which manages claim lifecycle.
 type SandboxExecutor struct {
-	// endpoint is the sandbox service URL (e.g., "http://sandbox-service:8090").
+	// endpoint is the sandbox service URL for direct mode (e.g., "http://sandbox-service:8090").
 	endpoint string
 	client   *http.Client
+
+	// Router mode (v2) fields — set when routerURL is non-empty.
+	routerURL   string
+	tenantID    string
+	poolRef     string
+	mu          sync.RWMutex
+	routerCache map[string]*routerSession // conversation_id → session
+}
+
+// routerSession tracks a sandbox claimed through the router.
+type routerSession struct {
+	sandboxID string
+	endpoint  string
+}
+
+// IsRouterMode returns true if the executor is configured for router mode.
+func (s *SandboxExecutor) IsRouterMode() bool {
+	return s.routerURL != ""
 }
 
 // SandboxConfig holds configuration for the sandbox executor.
 type SandboxConfig struct {
-	// Endpoint is the sandbox service URL. If empty, falls back to subprocess.
+	// Endpoint is the sandbox service URL (v1 direct mode). If empty, falls back to subprocess.
 	Endpoint string
+	// RouterURL is the sandbox router URL (v2 router mode). Takes precedence over Endpoint.
+	RouterURL string
+	// TenantID identifies the tenant for claim creation (router mode).
+	TenantID string
+	// PoolRef is the SandboxWarmPool name (router mode, default "tool-execution-pool").
+	PoolRef string
 }
 
-// NewSandboxExecutor creates a sandbox executor. Returns nil if endpoint is empty.
+// NewSandboxExecutor creates a sandbox executor.
+// When RouterURL is set, uses the sandbox router for claim-based lifecycle.
+// When only Endpoint is set, talks directly to a sandbox pod.
+// Returns nil if neither is configured.
 func NewSandboxExecutor(cfg SandboxConfig) *SandboxExecutor {
+	if cfg.RouterURL != "" {
+		// Router mode (v2) — claim lifecycle managed by the router.
+		return &SandboxExecutor{
+			endpoint:    "", // resolved per-conversation via router
+			client:      &http.Client{Timeout: 70 * time.Second},
+			routerURL:   cfg.RouterURL,
+			tenantID:    cfg.TenantID,
+			poolRef:     cfg.PoolRef,
+			routerCache: make(map[string]*routerSession),
+		}
+	}
 	if cfg.Endpoint == "" {
 		return nil
 	}
@@ -254,4 +298,263 @@ func (s *SandboxExecutor) Exists(ctx context.Context, path string) (bool, error)
 // SandboxServiceEndpoint returns the sandbox endpoint from environment.
 func SandboxServiceEndpoint() string {
 	return os.Getenv("VOLUND_SANDBOX_ENDPOINT")
+}
+
+// ---------------------------------------------------------------------------
+// Router client (v2) — claim lifecycle through the Sandbox Router
+// ---------------------------------------------------------------------------
+
+// claimSandbox claims a sandbox through the router for the given conversation.
+// If a sandbox is already cached for this conversation, it returns the cached endpoint.
+func (s *SandboxExecutor) claimSandbox(ctx context.Context, conversationID string) (*routerSession, error) {
+	s.mu.RLock()
+	if sess, ok := s.routerCache[conversationID]; ok {
+		s.mu.RUnlock()
+		return sess, nil
+	}
+	s.mu.RUnlock()
+
+	// Claim a new sandbox via the router.
+	reqBody, _ := json.Marshal(map[string]string{
+		"conversation_id": conversationID,
+		"tenant_id":       s.tenantID,
+		"pool_ref":        s.poolRef,
+	})
+
+	req, err := http.NewRequestWithContext(ctx, "POST", s.routerURL+"/v1/sandboxes", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("create claim request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("router claim request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("router claim failed (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		SandboxID string `json:"sandbox_id"`
+		Endpoint  string `json:"endpoint"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("parse claim response: %w", err)
+	}
+
+	sess := &routerSession{
+		sandboxID: result.SandboxID,
+		endpoint:  result.Endpoint,
+	}
+
+	s.mu.Lock()
+	s.routerCache[conversationID] = sess
+	s.mu.Unlock()
+
+	slog.Info("sandbox claimed via router",
+		"sandbox_id", result.SandboxID,
+		"endpoint", result.Endpoint,
+		"conversation_id", conversationID,
+	)
+
+	return sess, nil
+}
+
+// ExecuteViaRouter sends code to the sandbox through the router's proxy endpoint.
+func (s *SandboxExecutor) ExecuteViaRouter(ctx context.Context, conversationID, language, code string, timeout time.Duration) (string, error) {
+	sess, err := s.claimSandbox(ctx, conversationID)
+	if err != nil {
+		return "", fmt.Errorf("claim sandbox: %w", err)
+	}
+
+	reqBody, _ := json.Marshal(sandboxRequest{
+		Language: language,
+		Code:     code,
+		Timeout:  int(timeout.Seconds()),
+	})
+
+	url := s.routerURL + "/v1/sandboxes/" + sess.sandboxID + "/execute"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
+	if err != nil {
+		return "", fmt.Errorf("create router execute request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("router execute request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("router execute error (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+
+	var result sandboxResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("parse sandbox response: %w", err)
+	}
+
+	if result.Error != "" {
+		return "", fmt.Errorf("sandbox: %s", result.Error)
+	}
+
+	output := result.Stdout
+	if result.Stderr != "" {
+		if output != "" {
+			output += "\n"
+		}
+		output += "stderr:\n" + result.Stderr
+	}
+
+	if result.ExitCode != 0 {
+		return output, fmt.Errorf("execution failed (exit code %d)", result.ExitCode)
+	}
+
+	return output, nil
+}
+
+// UploadViaRouter sends a file to the sandbox through the router's proxy endpoint.
+func (s *SandboxExecutor) UploadViaRouter(ctx context.Context, conversationID, path, content string) error {
+	sess, err := s.claimSandbox(ctx, conversationID)
+	if err != nil {
+		return fmt.Errorf("claim sandbox: %w", err)
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"path":    path,
+		"content": content,
+	})
+
+	url := s.routerURL + "/v1/sandboxes/" + sess.sandboxID + "/upload"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create router upload request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("router upload request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("router upload error (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// DownloadViaRouter retrieves a file from the sandbox through the router.
+func (s *SandboxExecutor) DownloadViaRouter(ctx context.Context, conversationID, path string) ([]byte, error) {
+	sess, err := s.claimSandbox(ctx, conversationID)
+	if err != nil {
+		return nil, fmt.Errorf("claim sandbox: %w", err)
+	}
+
+	url := s.routerURL + "/v1/sandboxes/" + sess.sandboxID + "/download?path=" + path
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create router download request: %w", err)
+	}
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("router download request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("router download error (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+	return io.ReadAll(resp.Body)
+}
+
+// ListFilesViaRouter lists files through the router.
+func (s *SandboxExecutor) ListFilesViaRouter(ctx context.Context, conversationID, path string) ([]FileInfo, error) {
+	sess, err := s.claimSandbox(ctx, conversationID)
+	if err != nil {
+		return nil, fmt.Errorf("claim sandbox: %w", err)
+	}
+
+	url := s.routerURL + "/v1/sandboxes/" + sess.sandboxID + "/list"
+	if path != "" {
+		url += "?path=" + path
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create router list request: %w", err)
+	}
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("router list request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("router list error (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Files []FileInfo `json:"files"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("parse list response: %w", err)
+	}
+	return result.Files, nil
+}
+
+// Release releases a sandbox back to the pool via the router.
+func (s *SandboxExecutor) Release(ctx context.Context, conversationID string) error {
+	s.mu.Lock()
+	sess, ok := s.routerCache[conversationID]
+	if ok {
+		delete(s.routerCache, conversationID)
+	}
+	s.mu.Unlock()
+
+	if !ok {
+		return nil // nothing to release
+	}
+
+	url := s.routerURL + "/v1/sandboxes/" + sess.sandboxID
+	req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+	if err != nil {
+		return fmt.Errorf("create release request: %w", err)
+	}
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("release request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("release error (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+
+	slog.Info("sandbox released via router", "sandbox_id", sess.sandboxID, "conversation_id", conversationID)
+	return nil
+}
+
+// CachedSession returns the cached router session for a conversation, if any.
+// Exported for testing.
+func (s *SandboxExecutor) CachedSession(conversationID string) (sandboxID, endpoint string, ok bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sess, ok := s.routerCache[conversationID]
+	if !ok {
+		return "", "", false
+	}
+	return sess.sandboxID, sess.endpoint, true
 }
