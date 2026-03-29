@@ -12,6 +12,7 @@ import (
 
 	volundv1 "github.com/ai-volund/volund-proto/gen/go/volund/v1"
 
+	"github.com/ai-volund/volund-agent/internal/safety"
 	"github.com/ai-volund/volund-agent/internal/stream"
 	"github.com/ai-volund/volund-agent/internal/tools"
 )
@@ -84,25 +85,49 @@ func (r *Runtime) processTask(ctx context.Context, task *Task, taskCh <-chan []b
 		log.Info("task finished")
 	}()
 
+	// Scope session memory to this conversation.
+	if r.memory != nil {
+		r.memory.SetConversation(task.ConversationID)
+	}
+
 	// Apply config defaults for any zero-value fields in the task.
 	r.applyDefaults(task)
 
 	// Load skills: append prompt skills to system prompt, connect MCP sidecars.
 	task.SystemPrompt = r.loadSkills(ctx, task)
 
+	// Append content safety policy to instruct the LLM to treat external
+	// data markers as untrusted. This is a defense-in-depth measure.
+	task.SystemPrompt += safety.SystemPromptSuffix()
+
 	messages := buildMessages(task)
 
-	// Auto-inject relevant long-term memories into the system prompt.
-	if r.memory != nil && len(task.Messages) > 0 {
-		lastMsg := task.Messages[len(task.Messages)-1]
-		if lastMsg.Role == "user" && len(lastMsg.Content) > 0 {
-			query := lastMsg.Content[0].Text
-			if memCtx := r.memory.RetrieveContext(ctx, query, 5); memCtx != "" {
-				task.SystemPrompt += memCtx
-				// Rebuild messages with updated system prompt.
-				messages = buildMessages(task)
-				log.Info("long-term memories injected into context")
+	// Auto-inject session history and long-term memories into the system prompt.
+	if r.memory != nil {
+		needsRebuild := false
+
+		// Inject recent session history for continuity.
+		if hist, err := r.memory.GetHistory(ctx, 20); err == nil && hist != "" {
+			task.SystemPrompt += hist
+			needsRebuild = true
+			log.Info("session history injected into context")
+		}
+
+		// Inject relevant long-term memories.
+		if len(task.Messages) > 0 {
+			lastMsg := task.Messages[len(task.Messages)-1]
+			if lastMsg.Role == "user" && len(lastMsg.Content) > 0 {
+				query := lastMsg.Content[0].Text
+				if memCtx := r.memory.RetrieveContext(ctx, query, 5); memCtx != "" {
+					task.SystemPrompt += memCtx
+					needsRebuild = true
+					log.Info("long-term memories injected into context")
+				}
 			}
+		}
+
+		if needsRebuild {
+			messages = buildMessages(task)
 		}
 	}
 
@@ -116,7 +141,23 @@ func (r *Runtime) processTask(ctx context.Context, task *Task, taskCh <-chan []b
 
 		// Accumulate text content from the assistant's final message for the
 		// task result that gets published on agent_end.
-		accumulatedContent += extractText(assistantMsg)
+		assistantText := extractText(assistantMsg)
+		accumulatedContent += assistantText
+
+		// Persist the exchange to session history.
+		if r.memory != nil {
+			// Append the latest user message.
+			if len(task.Messages) > 0 {
+				lastUser := task.Messages[len(task.Messages)-1]
+				if lastUser.Role == "user" && len(lastUser.Content) > 0 {
+					_ = r.memory.AppendMessage(ctx, "user", lastUser.Content[0].Text)
+				}
+			}
+			// Append the assistant reply.
+			if assistantText != "" {
+				_ = r.memory.AppendMessage(ctx, "assistant", assistantText)
+			}
+		}
 
 		// Non-blocking check for a follow-up task on the same channel.
 		select {
@@ -337,7 +378,7 @@ func (r *Runtime) executeTools(
 			Block: &volundv1.ContentBlock_ToolResult{
 				ToolResult: &volundv1.ToolResultContent{
 					ToolUseId: result.CallID,
-					Content:   result.Content,
+					Content:   safety.SanitizeToolResult(result.Content),
 					IsError:   result.IsError,
 				},
 			},

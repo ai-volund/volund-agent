@@ -30,6 +30,12 @@ func (m *mockMemManager) SearchSimilar(_ context.Context, _ string, _ int) ([]me
 	return m.searchResults, m.searchErr
 }
 
+func (m *mockMemManager) SetConversation(_ string) {}
+
+func (m *mockMemManager) AppendMessage(_ context.Context, _, _ string) error { return nil }
+
+func (m *mockMemManager) GetHistory(_ context.Context, _ int) (string, error) { return "", nil }
+
 func (m *mockMemManager) RetrieveContext(_ context.Context, _ string, _ int) string {
 	return ""
 }

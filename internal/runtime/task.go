@@ -65,7 +65,7 @@ type Message struct {
 
 // Block is a single content block within a Message.
 type Block struct {
-	Type string `json:"type"` // "text" | "tool_use" | "tool_result"
+	Type string `json:"type"` // "text" | "tool_use" | "tool_result" | "attachment"
 
 	// text
 	Text string `json:"text,omitempty"`
@@ -78,6 +78,13 @@ type Block struct {
 	// tool_result
 	Content string `json:"content,omitempty"`
 	IsError bool   `json:"is_error,omitempty"`
+
+	// attachment (file upload)
+	AttachmentID string `json:"attachment_id,omitempty"`
+	URL          string `json:"url,omitempty"`
+	FileName     string `json:"file_name,omitempty"`
+	MimeType     string `json:"mime_type,omitempty"`
+	Size         int64  `json:"size,omitempty"`
 }
 
 // toProtoMessages converts transport messages to proto LLMMessages for the LLM router.
@@ -110,6 +117,15 @@ func toProtoMessages(msgs []Message) []*volundv1.LLMMessage {
 							IsError:   b.IsError,
 						},
 					},
+				})
+			case "attachment":
+				// Attachments are rendered as text for the LLM with metadata.
+				desc := "[Attached file: " + b.FileName + " (" + b.MimeType + ")]"
+				if b.URL != "" {
+					desc += " URL: " + b.URL
+				}
+				blocks = append(blocks, &volundv1.ContentBlock{
+					Block: &volundv1.ContentBlock_Text{Text: desc},
 				})
 			}
 		}

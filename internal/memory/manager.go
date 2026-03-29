@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/ai-volund/volund-agent/internal/safety"
 )
 
 // Memory represents a stored memory entry.
@@ -25,10 +27,19 @@ type Memory struct {
 
 // Manager defines the interface for agent memory storage and retrieval.
 type Manager interface {
+	// SetConversation scopes subsequent session operations to a conversation.
+	// Must be called at the start of each task before any session read/write.
+	SetConversation(convID string)
 	// StoreSession stores a key-value pair in short-term session memory.
 	StoreSession(ctx context.Context, key, value string) error
 	// GetSession retrieves a value from session memory by key.
 	GetSession(ctx context.Context, key string) (string, error)
+	// AppendMessage appends a message to the conversation's session history.
+	// role is "user" or "assistant", content is the text.
+	AppendMessage(ctx context.Context, role, content string) error
+	// GetHistory returns the last N messages from session history as a
+	// formatted string suitable for prompt injection.
+	GetHistory(ctx context.Context, limit int) (string, error)
 	// StoreLongTerm persists a memory entry to long-term storage.
 	StoreLongTerm(ctx context.Context, mem Memory) error
 	// SearchSimilar finds memories similar to the query using vector search.
@@ -64,20 +75,36 @@ func (n *noopManager) SearchSimilar(_ context.Context, _ string, _ int) ([]Memor
 	return nil, nil
 }
 
+func (n *noopManager) SetConversation(_ string) {}
+
+func (n *noopManager) AppendMessage(_ context.Context, _, _ string) error {
+	return nil
+}
+
+func (n *noopManager) GetHistory(_ context.Context, _ int) (string, error) {
+	return "", nil
+}
+
 func (n *noopManager) RetrieveContext(_ context.Context, _ string, _ int) string {
 	return ""
 }
 
 // FormatMemories formats a slice of memories into a block for system prompt injection.
+// All memory content is sanitized to mitigate prompt injection attacks.
 func FormatMemories(memories []Memory) string {
 	if len(memories) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("\n\n<relevant-memories>\n")
+	b.WriteString("\n\n")
+	b.WriteString(safety.WrapExternal("memories", formatMemoriesInner(memories)))
+	return b.String()
+}
+
+func formatMemoriesInner(memories []Memory) string {
+	var b strings.Builder
 	for _, m := range memories {
-		fmt.Fprintf(&b, "[%s] %s\n", m.Type, m.Content)
+		fmt.Fprintf(&b, "[%s] %s\n", m.Type, safety.SanitizeMemory(m.Content))
 	}
-	b.WriteString("</relevant-memories>")
 	return b.String()
 }

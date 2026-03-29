@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ai-volund/volund-agent/internal/safety"
 )
 
 // SessionTTL is how long session keys persist in Redis.
@@ -100,6 +102,45 @@ func (r *RedisManager) SearchSimilar(ctx context.Context, query string, limit in
 	return r.longTerm.Search(ctx, query, limit)
 }
 
+// SetConversation updates the conversation ID used to scope session keys.
+func (r *RedisManager) SetConversation(convID string) {
+	r.convID = convID
+}
+
+// AppendMessage appends a chat message to the conversation's session history.
+// Messages are stored as a Redis LIST with key conv:{convID}:messages.
+func (r *RedisManager) AppendMessage(ctx context.Context, role, content string) error {
+	key := r.sessionKey("messages")
+	entry := role + ": " + content
+	if err := r.do("RPUSH", key, entry); err != nil {
+		return fmt.Errorf("append message: %w", err)
+	}
+	// Ensure the list has a TTL so it doesn't persist indefinitely.
+	_ = r.do("EXPIRE", key, strconv.Itoa(int(SessionTTL.Seconds())))
+	return nil
+}
+
+// GetHistory returns the last N messages from session history as a formatted
+// string suitable for prompt injection.
+func (r *RedisManager) GetHistory(ctx context.Context, limit int) (string, error) {
+	key := r.sessionKey("messages")
+	// LRANGE with negative indices: -limit to -1 gets the last `limit` entries.
+	start := fmt.Sprintf("-%d", limit)
+	entries, err := r.doList("LRANGE", key, start, "-1")
+	if err != nil {
+		return "", fmt.Errorf("get history: %w", err)
+	}
+	if len(entries) == 0 {
+		return "", nil
+	}
+	var inner strings.Builder
+	for _, e := range entries {
+		inner.WriteString(safety.SanitizeMemory(e))
+		inner.WriteByte('\n')
+	}
+	return "\n\n" + safety.WrapExternal("session_history", inner.String()), nil
+}
+
 // RetrieveContext searches for relevant memories and formats them for prompt injection.
 func (r *RedisManager) RetrieveContext(ctx context.Context, query string, limit int) string {
 	memories, err := r.SearchSimilar(ctx, query, limit)
@@ -133,6 +174,14 @@ func (r *RedisManager) doString(args ...string) (string, error) {
 		return "", err
 	}
 	return r.readBulkString()
+}
+
+// doList executes a command that returns a Redis array (e.g. LRANGE).
+func (r *RedisManager) doList(args ...string) ([]string, error) {
+	if err := r.writeCommand(args); err != nil {
+		return nil, err
+	}
+	return r.readArray()
 }
 
 func (r *RedisManager) writeCommand(args []string) error {
@@ -186,4 +235,48 @@ func (r *RedisManager) readBulkString() (string, error) {
 		return "", fmt.Errorf("redis: %s", resp[1:])
 	}
 	return resp, nil
+}
+
+// readArray parses a RESP array response (e.g. from LRANGE).
+// Format: *N\r\n$len\r\nvalue\r\n$len\r\nvalue\r\n...
+func (r *RedisManager) readArray() ([]string, error) {
+	var buf [65536]byte
+	n, err := r.conn.Read(buf[:])
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	resp := string(buf[:n])
+
+	// Empty array or nil: *0\r\n or *-1\r\n
+	if strings.HasPrefix(resp, "*0") || strings.HasPrefix(resp, "*-1") {
+		return nil, nil
+	}
+	// Error response
+	if strings.HasPrefix(resp, "-") {
+		return nil, fmt.Errorf("redis: %s", strings.TrimRight(resp[1:], "\r\n"))
+	}
+
+	lines := strings.Split(resp, "\r\n")
+	if len(lines) < 1 || !strings.HasPrefix(lines[0], "*") {
+		return nil, fmt.Errorf("redis: unexpected array response: %q", resp)
+	}
+
+	count, parseErr := strconv.Atoi(lines[0][1:])
+	if parseErr != nil {
+		return nil, fmt.Errorf("redis: bad array count: %w", parseErr)
+	}
+
+	result := make([]string, 0, count)
+	i := 1
+	for len(result) < count && i < len(lines) {
+		if strings.HasPrefix(lines[i], "$") {
+			// Next line is the value.
+			i++
+			if i < len(lines) {
+				result = append(result, lines[i])
+			}
+		}
+		i++
+	}
+	return result, nil
 }

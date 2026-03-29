@@ -145,6 +145,112 @@ func (r *RunCodeSandboxed) Execute(ctx context.Context, inputJSON string) (strin
 	return (RunCode{}).Execute(ctx, inputJSON)
 }
 
+// Upload sends a file to the sandbox workspace.
+func (s *SandboxExecutor) Upload(ctx context.Context, path, content string) error {
+	body, _ := json.Marshal(map[string]string{
+		"path":    path,
+		"content": content,
+	})
+	req, err := http.NewRequestWithContext(ctx, "POST", s.endpoint+"/upload", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create upload request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("upload request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("upload error (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// Download retrieves a file from the sandbox workspace.
+func (s *SandboxExecutor) Download(ctx context.Context, path string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", s.endpoint+"/download?path="+path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create download request: %w", err)
+	}
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("download request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("download error (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+	return io.ReadAll(resp.Body)
+}
+
+// FileInfo represents a file entry from the sandbox workspace listing.
+type FileInfo struct {
+	Name    string `json:"name"`
+	Size    int64  `json:"size"`
+	IsDir   bool   `json:"is_dir"`
+	ModTime string `json:"mod_time"`
+}
+
+// ListFiles lists files in the sandbox workspace directory.
+func (s *SandboxExecutor) ListFiles(ctx context.Context, path string) ([]FileInfo, error) {
+	url := s.endpoint + "/list"
+	if path != "" {
+		url += "?path=" + path
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create list request: %w", err)
+	}
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("list error (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Files []FileInfo `json:"files"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("parse list response: %w", err)
+	}
+	return result.Files, nil
+}
+
+// Exists checks if a file exists in the sandbox workspace.
+func (s *SandboxExecutor) Exists(ctx context.Context, path string) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", s.endpoint+"/exists?path="+path, nil)
+	if err != nil {
+		return false, fmt.Errorf("create exists request: %w", err)
+	}
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("exists request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Exists bool `json:"exists"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false, fmt.Errorf("parse exists response: %w", err)
+	}
+	return result.Exists, nil
+}
+
 // SandboxServiceEndpoint returns the sandbox endpoint from environment.
 func SandboxServiceEndpoint() string {
 	return os.Getenv("VOLUND_SANDBOX_ENDPOINT")

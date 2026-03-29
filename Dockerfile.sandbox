@@ -1,0 +1,68 @@
+# Dockerfile.sandbox — builds the ghcr.io/ai-volund/sandbox-runtime image.
+# Purpose-built for sandboxed code execution with gVisor RuntimeClass.
+#
+# Build from workspace root (where volund-proto and volund-agent live):
+#   docker build -f volund-agent/Dockerfile.sandbox -t ghcr.io/ai-volund/sandbox-runtime:latest .
+
+FROM golang:1.26-bookworm AS builder
+
+WORKDIR /workspace
+
+# Copy proto dependency for module resolution.
+COPY volund-proto/ volund-proto/
+
+# Cache module downloads.
+COPY volund-agent/go.mod volund-agent/go.sum volund-agent/
+WORKDIR /workspace/volund-agent
+RUN go mod download
+
+# Build sandbox-service binary.
+COPY volund-agent/ .
+RUN CGO_ENABLED=0 GOOS=linux \
+    go build -ldflags "-s -w" -o /bin/sandbox-service ./cmd/sandbox-service
+
+# --- Runtime image ---
+# Slim Debian with language runtimes for code execution.
+FROM debian:bookworm-slim
+
+# Install language runtimes and common data science packages.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-venv \
+    nodejs \
+    ca-certificates \
+    curl \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install common Python packages that agents frequently use.
+RUN python3 -m pip install --no-cache-dir --break-system-packages \
+    requests \
+    beautifulsoup4 \
+    pyyaml \
+    pandas \
+    numpy
+
+# Create non-root sandbox user.
+RUN groupadd -g 1000 sandbox && \
+    useradd -u 1000 -g sandbox -m -s /bin/bash sandbox
+
+# Create workspace directory.
+RUN mkdir -p /tmp/sandbox-workspace && \
+    chown sandbox:sandbox /tmp/sandbox-workspace
+
+COPY --from=builder /bin/sandbox-service /bin/sandbox-service
+
+# Run as non-root.
+USER 1000:1000
+
+ENV SANDBOX_ADDR=":8090"
+ENV SANDBOX_WORKSPACE="/tmp/sandbox-workspace"
+
+EXPOSE 8090
+
+HEALTHCHECK --interval=5s --timeout=2s --retries=3 \
+    CMD curl -f http://localhost:8090/healthz || exit 1
+
+ENTRYPOINT ["/bin/sandbox-service"]

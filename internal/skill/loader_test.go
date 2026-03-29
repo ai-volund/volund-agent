@@ -210,6 +210,63 @@ func TestLoadMixedSkills(t *testing.T) {
 	}
 }
 
+func TestSharedSkillURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		spec     Spec
+		expected string
+	}{
+		{
+			name: "default URL from skill name",
+			spec: Spec{
+				Name:    "github",
+				Runtime: &RuntimeSpec{Mode: "shared"},
+			},
+			expected: "http://skill-github:8080",
+		},
+		{
+			name: "explicit HTTP URL override",
+			spec: Spec{
+				Name:    "github",
+				Runtime: &RuntimeSpec{Mode: "shared", Image: "http://custom-host:9090"},
+			},
+			expected: "http://custom-host:9090",
+		},
+		{
+			name: "explicit HTTPS URL override",
+			spec: Spec{
+				Name:    "slack",
+				Runtime: &RuntimeSpec{Mode: "shared", Image: "https://skill.example.com"},
+			},
+			expected: "https://skill.example.com",
+		},
+		{
+			name: "non-URL image uses default convention",
+			spec: Spec{
+				Name:    "email",
+				Runtime: &RuntimeSpec{Mode: "shared", Image: "ghcr.io/ai-volund/skill-email:1.0"},
+			},
+			expected: "http://skill-email:8080",
+		},
+		{
+			name: "nil runtime uses default",
+			spec: Spec{
+				Name: "test",
+			},
+			expected: "http://skill-test:8080",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sharedSkillURL(tt.spec)
+			if got != tt.expected {
+				t.Errorf("sharedSkillURL() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestLoadUnknownSkillType(t *testing.T) {
 	ctx := context.Background()
 	skills := []Spec{

@@ -29,12 +29,17 @@ spec:
       # runtimeClassName: gvisor
       containers:
         - name: sandbox
-          image: ghcr.io/ai-volund/sandbox-service:latest
+          image: ghcr.io/ai-volund/sandbox-runtime:latest
           ports:
             - containerPort: 8090
           env:
             - name: SANDBOX_ADDR
               value: ":8090"
+            - name: SANDBOX_WORKSPACE
+              value: "/tmp/sandbox-workspace"
+          volumeMounts:
+            - name: workspace
+              mountPath: /tmp/sandbox-workspace
           resources:
             requests:
               cpu: 100m
@@ -45,7 +50,7 @@ spec:
           securityContext:
             runAsNonRoot: true
             runAsUser: 1000
-            readOnlyRootFilesystem: false  # needs writable /tmp for code execution
+            readOnlyRootFilesystem: false  # needs writable workspace for code execution
             allowPrivilegeEscalation: false
           readinessProbe:
             httpGet:
@@ -53,6 +58,16 @@ spec:
               port: 8090
             initialDelaySeconds: 2
             periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8090
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: workspace
+          emptyDir:
+            sizeLimit: 1Gi
 ---
 apiVersion: v1
 kind: Service

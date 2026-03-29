@@ -119,6 +119,16 @@ func startCLIAdapter(ctx context.Context, s Spec) (ToolCaller, error) {
 }
 
 func connectMCP(ctx context.Context, s Spec) (ToolCaller, error) {
+	// Shared-mode skills are deployed as a per-tenant Deployment + Service by the
+	// operator. The agent connects via HTTP to the well-known service URL:
+	//   http://skill-{name}:8080
+	// The transport is always HTTP regardless of what the spec says.
+	if s.Runtime != nil && s.Runtime.Mode == "shared" {
+		baseURL := sharedSkillURL(s)
+		slog.Info("connecting to shared skill via HTTP", "name", s.Name, "url", baseURL)
+		return ConnectMCPHTTP(ctx, baseURL)
+	}
+
 	transport := "stdio"
 	if s.Runtime != nil && s.Runtime.Transport != "" {
 		transport = s.Runtime.Transport
@@ -147,6 +157,18 @@ func connectMCP(ctx context.Context, s Spec) (ToolCaller, error) {
 	default:
 		return nil, fmt.Errorf("unsupported MCP transport %q for skill %q", transport, s.Name)
 	}
+}
+
+// sharedSkillURL returns the in-cluster HTTP URL for a shared-mode skill.
+// Convention: the operator creates a Service named "skill-{name}" in the
+// agent's namespace, listening on port 8080.
+func sharedSkillURL(s Spec) string {
+	// Allow explicit URL override via runtime.image (e.g. for dev/testing).
+	if s.Runtime != nil && s.Runtime.Image != "" &&
+		(strings.HasPrefix(s.Runtime.Image, "http://") || strings.HasPrefix(s.Runtime.Image, "https://")) {
+		return s.Runtime.Image
+	}
+	return fmt.Sprintf("http://skill-%s:8080", s.Name)
 }
 
 func discoverTools(ctx context.Context, skillName string, client ToolCaller) ([]Tool, error) {
