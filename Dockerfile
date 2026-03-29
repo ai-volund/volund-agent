@@ -20,6 +20,13 @@ RUN CGO_ENABLED=0 GOOS=linux \
 RUN CGO_ENABLED=0 GOOS=linux \
     go build -ldflags "-s -w" -o /bin/mcp-cli-adapter ./cmd/mcp-cli-adapter
 
+# Build skills that ship with the base image.
+WORKDIR /workspace
+COPY volund-skills/skills/email/ volund-skills/skills/email/
+WORKDIR /workspace/volund-skills/skills/email
+RUN CGO_ENABLED=0 GOOS=linux \
+    go build -ldflags "-s -w" -o /bin/mcp-email .
+
 # Use a slim Debian image (not distroless) so the run_code tool has access
 # to python3 and bash for code execution.
 FROM debian:bookworm-slim
@@ -34,5 +41,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /bin/volund-agent /bin/volund-agent
 COPY --from=builder /bin/mcp-echo /usr/local/bin/mcp-echo
 COPY --from=builder /bin/mcp-cli-adapter /usr/local/bin/mcp-cli-adapter
+COPY --from=builder /bin/mcp-email /usr/local/bin/mcp-email
 
 ENTRYPOINT ["/bin/volund-agent"]

@@ -137,6 +137,17 @@ func connectMCP(ctx context.Context, s Spec) (ToolCaller, error) {
 		return ConnectMCPHTTP(ctx, baseURL)
 	}
 
+	// Build env vars from credentials.
+	// MCP skills read CREDENTIAL_TOKEN and CREDENTIAL_PROVIDER to access external APIs.
+	var env []string
+	if len(s.Credentials) > 0 {
+		for provider, token := range s.Credentials {
+			env = append(env, "CREDENTIAL_TOKEN="+token, "CREDENTIAL_PROVIDER="+provider)
+			slog.Info("injecting credential into MCP skill", "skill", s.Name, "provider", provider)
+			break // one credential per skill for now
+		}
+	}
+
 	transport := "stdio"
 	if s.Runtime != nil && s.Runtime.Transport != "" {
 		transport = s.Runtime.Transport
@@ -154,7 +165,7 @@ func connectMCP(ctx context.Context, s Spec) (ToolCaller, error) {
 			// a unix socket or localhost port. For now, start as subprocess.
 			cmd = s.Runtime.Image
 		}
-		return StartMCPProcess(ctx, cmd)
+		return StartMCPProcessWithEnv(ctx, env, cmd)
 
 	case "http-sse", "http":
 		if s.Runtime == nil || s.Runtime.Image == "" {

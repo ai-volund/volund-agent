@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
@@ -71,8 +72,17 @@ type contentBlock struct {
 
 // StartMCPProcess starts an MCP server as a subprocess and performs the
 // initialize handshake. Returns the connected client.
+// Optional env vars can be passed to the subprocess (e.g. CREDENTIAL_TOKEN).
 func StartMCPProcess(ctx context.Context, command string, args ...string) (*MCPClient, error) {
+	return StartMCPProcessWithEnv(ctx, nil, command, args...)
+}
+
+// StartMCPProcessWithEnv starts an MCP server subprocess with additional env vars.
+func StartMCPProcessWithEnv(ctx context.Context, env []string, command string, args ...string) (*MCPClient, error) {
 	cmd := exec.CommandContext(ctx, command, args...)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

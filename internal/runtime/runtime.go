@@ -293,6 +293,20 @@ func (r *Runtime) loadSkills(ctx context.Context, task *Task) string {
 		return task.SystemPrompt
 	}
 
+	// Inject task credentials into MCP skill specs so the loader can pass
+	// them as environment variables to subprocesses.
+	if len(task.Credentials) > 0 {
+		credMap := make(map[string]string)
+		for _, c := range task.Credentials {
+			credMap[c.Provider] = c.Token
+		}
+		for i := range task.Skills {
+			if task.Skills[i].Type == "mcp" && task.Skills[i].Credentials == nil {
+				task.Skills[i].Credentials = credMap
+			}
+		}
+	}
+
 	result, err := skill.Load(ctx, task.Skills)
 	if err != nil {
 		slog.Warn("skill loading failed", "error", err)

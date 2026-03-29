@@ -16,6 +16,10 @@ type Spec struct {
 	Runtime     *RuntimeSpec `json:"runtime,omitempty"`
 	CLI         *CLISpec     `json:"cli,omitempty"`
 	Parameters  []Parameter  `json:"parameters,omitempty"`
+
+	// Credentials injected at dispatch time for MCP skills that need external API access.
+	// Map of provider -> token (e.g. "gmail" -> "ya29.xxx").
+	Credentials map[string]string `json:"credentials,omitempty"`
 }
 
 type RuntimeSpec struct {
