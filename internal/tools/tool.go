@@ -91,6 +91,15 @@ func (r *Registry) Has(name string) bool {
 	return ok
 }
 
+// Replace registers a tool, overwriting any existing tool with the same name.
+// Used by skill loading to let MCP/CLI tools override builtins of the same name.
+func (r *Registry) Replace(t Tool) {
+	if _, exists := r.tools[t.Name()]; exists {
+		slog.Debug("tool replaced", "name", t.Name())
+	}
+	r.tools[t.Name()] = t
+}
+
 // Execute runs a tool call through the before hooks, tool implementation,
 // and after hooks. Never returns an error — failures are encoded in Result.IsError.
 func (r *Registry) Execute(ctx context.Context, call Call) Result {

@@ -241,6 +241,17 @@ func (r *Runtime) Stop() error {
 	return nil
 }
 
+// resetForTask stops stale MCP skill connections and rebuilds the tool registry.
+// This must be called at the start of each task so that warm-pool pods don't
+// reuse skill tools from a previous task (which may carry expired credentials).
+func (r *Runtime) resetForTask() {
+	for _, c := range r.skillClients {
+		c.Stop()
+	}
+	r.skillClients = nil
+	r.toolRegistry = r.buildToolRegistry()
+}
+
 // buildToolRegistry registers built-in tools appropriate for this profile type.
 func (r *Runtime) buildToolRegistry() *tools.Registry {
 	reg := tools.NewRegistry()
@@ -262,7 +273,6 @@ func (r *Runtime) buildToolRegistry() *tools.Registry {
 	} else {
 		reg.Register(builtin.RunCode{})
 	}
-	reg.Register(&builtin.WebSearch{})
 	reg.Register(builtin.NewReadMemory(r.memory))
 	reg.Register(builtin.NewWriteMemory(r.memory))
 
@@ -313,14 +323,15 @@ func (r *Runtime) loadSkills(ctx context.Context, task *Task) string {
 		return task.SystemPrompt
 	}
 
-	// Register MCP/CLI tools.
+	// Register MCP/CLI tools. Skill tools override builtins of the same name
+	// since skills carry task-scoped credentials that builtins lack.
 	for _, t := range result.Tools {
 		if r.toolRegistry.Has(t.Name()) {
-			slog.Warn("skill tool name conflicts with builtin, skipping", "name", t.Name())
-			continue
+			slog.Info("skill tool overrides builtin", "name", t.Name())
+			r.toolRegistry.Replace(&skillToolAdapter{inner: t})
+		} else {
+			r.toolRegistry.Register(&skillToolAdapter{inner: t})
 		}
-		// Wrap skill.Tool as tools.Tool via the adapter.
-		r.toolRegistry.Register(&skillToolAdapter{inner: t})
 	}
 
 	// Track clients for shutdown.

@@ -85,6 +85,11 @@ func (r *Runtime) processTask(ctx context.Context, task *Task, taskCh <-chan []b
 		log.Info("task finished")
 	}()
 
+	// Reset tool registry and stop stale MCP connections from previous tasks.
+	// Warm-pool pods reuse the same Runtime across tasks, so skill tools from
+	// an earlier task (with now-expired credentials) must not linger.
+	r.resetForTask()
+
 	// Scope session memory to this conversation.
 	if r.memory != nil {
 		r.memory.SetConversation(task.ConversationID)

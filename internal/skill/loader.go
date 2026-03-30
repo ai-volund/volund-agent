@@ -155,14 +155,13 @@ func connectMCP(ctx context.Context, s Spec) (ToolCaller, error) {
 
 	switch transport {
 	case "stdio":
-		// For sidecar MCP servers, the binary path is derived from the skill name.
-		// The operator injects the sidecar container; the binary is at a known path.
-		// Convention: /usr/local/bin/mcp-{skill-name} or just the image entrypoint.
-		// For local testing, the command can be overridden via VOLUND_MCP_{NAME}_CMD.
+		// Convention: sidecar MCP binaries live at /usr/local/bin/mcp-{skill-name}.
+		// The Runtime.Image field identifies the container image for the operator.
+		// If it looks like a container image reference (e.g. ghcr.io/org/name:tag),
+		// ignore it and use the convention. Otherwise treat it as a binary path
+		// (useful for local dev/testing).
 		cmd := fmt.Sprintf("mcp-%s", s.Name)
-		if s.Runtime != nil && s.Runtime.Image != "" {
-			// In production the sidecar is already running — we'd connect via
-			// a unix socket or localhost port. For now, start as subprocess.
+		if s.Runtime != nil && s.Runtime.Image != "" && !isContainerImage(s.Runtime.Image) {
 			cmd = s.Runtime.Image
 		}
 		return StartMCPProcessWithEnv(ctx, env, cmd)
@@ -188,6 +187,19 @@ func sharedSkillURL(s Spec) string {
 		return s.Runtime.Image
 	}
 	return fmt.Sprintf("http://skill-%s:8080", s.Name)
+}
+
+// isContainerImage returns true if s looks like a container image reference
+// (e.g. "ghcr.io/org/name:1.0" or "docker.io/library/alpine"). Local binary
+// paths like "/usr/local/bin/mcp-web" or "mcp-web" return false.
+func isContainerImage(s string) bool {
+	// Container images have a registry domain (contains dots) before the first slash.
+	parts := strings.SplitN(s, "/", 2)
+	if len(parts) < 2 {
+		return false // no slash — plain binary name
+	}
+	// If the first segment has dots, it's a registry domain.
+	return strings.Contains(parts[0], ".")
 }
 
 func discoverTools(ctx context.Context, skillName string, client ToolCaller) ([]Tool, error) {

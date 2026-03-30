@@ -27,6 +27,12 @@ WORKDIR /workspace/volund-skills/skills/email
 RUN CGO_ENABLED=0 GOOS=linux \
     go build -ldflags "-s -w" -o /bin/mcp-email .
 
+WORKDIR /workspace
+COPY volund-skills/skills/web/ volund-skills/skills/web/
+WORKDIR /workspace/volund-skills/skills/web
+RUN CGO_ENABLED=0 GOOS=linux \
+    go build -ldflags "-s -w" -o /bin/mcp-web .
+
 # Use a slim Debian image (not distroless) so the run_code tool has access
 # to python3 and bash for code execution.
 FROM debian:bookworm-slim
@@ -42,5 +48,6 @@ COPY --from=builder /bin/volund-agent /bin/volund-agent
 COPY --from=builder /bin/mcp-echo /usr/local/bin/mcp-echo
 COPY --from=builder /bin/mcp-cli-adapter /usr/local/bin/mcp-cli-adapter
 COPY --from=builder /bin/mcp-email /usr/local/bin/mcp-email
+COPY --from=builder /bin/mcp-web /usr/local/bin/mcp-web
 
 ENTRYPOINT ["/bin/volund-agent"]
